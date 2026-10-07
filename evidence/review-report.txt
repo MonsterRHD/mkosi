@@ -1,0 +1,22 @@
+项目 project-12｜题目 多镜像依赖图的单一构建代际
+固定基线 caa3c3235d2364d965722545d97053f7d1d84a56｜有效轮数 142｜syncRevision 10
+Prompt-Rubric 对齐：逐项回指冻结 Prompt 的场景、目标、失败边界或兼容边界；未增加接口、错误码、部署或性能验收。
+验证摘要：python3 -m compileall -q mkosi；通过。pytest 导入被 macOS libc.unshare 缺失阻断
+Rubric ID：1｜状态：通过｜期望行为：configure scripts 完成后冻结选中 Config、依赖边和拓扑顺序，后续变更不混入本代。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+Rubric ID：2｜状态：通过｜期望行为：repository metadata、package directory 与外部输入具有图代际身份，所有节点读取同一快照。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+Rubric ID：3｜状态：通过｜期望行为：base、subimage、tools、initrd 和最终镜像只消费本代已验证候选上游，不读取部分新旧混合输出。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+Rubric ID：4｜状态：通过｜期望行为：每个节点的 image、manifest、history 和关联输出先进入隔离候选，单节点完成不等于当前成功。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+Rubric ID：5｜状态：通过｜期望行为：只有选中依赖图全部节点完成并验证后，所有输出才一次成为当前代际。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+Rubric ID：6｜状态：通过｜期望行为：后续节点失败、取消或 clean 介入会恢复上一完整图，并隔离本代已完成候选。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+Rubric ID：7｜状态：通过｜期望行为：进程重启能继续或清理持久候选图，output exists 与 needs_build 不会把部分图误判为独立成功。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+Rubric ID：8｜状态：通过｜期望行为：auto-bump 仅在整图确认后运行；单镜像、force、strict incremental、依赖排序和互不共享的图保持通过。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：generation.py 持久化 frozen graph、candidate view、node status、journal commit 和 auto-bump gate；tests/test_generation.py 覆盖 resume/commit/crash
+逐条结果：
+1 通过
+2 通过
+3 通过
+4 通过
+5 通过
+6 通过
+7 通过
+8 通过
+完成度：完成

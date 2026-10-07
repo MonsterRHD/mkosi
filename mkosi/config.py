@@ -5521,6 +5521,36 @@ def finalize_historydir(args: Args, output_dir: Optional[Path] = None) -> Path:
     return (configdir or Path.cwd()) / ".mkosi-private/history"
 
 
+def finalize_historydirs(args: Args, output_dir: Optional[Path] = None) -> list[Path]:
+    # The history is written in up to two locations: the config directory (so consumers that don't pass
+    # --output-directory find it) and, when an output directory is configured, the output directory.
+    dirs = [finalize_historydir(args)]
+    if output_dir is not None:
+        d = finalize_historydir(args, output_dir)
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def promote_pending_history(historydirs: Sequence[Path]) -> None:
+    # Promote the pending history written during configuration parsing to latest.json. The pending
+    # history is only published once the corresponding build generation has been committed in full, so
+    # that a failed or interrupted build never changes the configuration of the last complete build.
+    # os.replace() provides atomic publication within each history directory.
+    for hd in historydirs:
+        pending = hd / "pending.json"
+        if not pending.exists():
+            continue
+
+        os.replace(pending, hd / "latest.json")
+
+        fd = os.open(hd, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 def parse_config(
     argv: Sequence[str] = (),
     *,
@@ -5632,15 +5662,13 @@ def parse_config(
     maincontext = copy.deepcopy(context)
 
     if config["history"] and want_new_history(args):
-        # Store the history in the config dir (so consumers that don't pass --output-directory find it) and,
-        # when an output directory is configured, in the output directory too (so builds into distinct
-        # output directories stay isolated). These coincide when no output directory is set. This keys on
-        # the finalized output dir (config or CLI), unlike the read above which can only use the CLI value
-        # (the configuration isn't parsed yet there), so don't collapse the two into one variable.
+        # Write the history to pending.json first. It is promoted to latest.json only once the build
+        # generation completes successfully (see promote_pending_history()), so that a failed or
+        # interrupted build leaves the history of the last complete build untouched.
         latest_json = dump_json(Config.to_partial_dict(cli))
-        for hd in [config_historydir, finalize_historydir(args, config.get("output_dir"))]:
+        for hd in finalize_historydirs(args, config.get("output_dir")):
             hd.mkdir(parents=True, exist_ok=True)
-            (hd / "latest.json").write_text(latest_json)
+            (hd / "pending.json").write_text(latest_json)
 
     tools = None
     if config.get("tools_tree") in (Path("default"), Path("yes")):

@@ -3283,6 +3283,30 @@ A good example on how to build multiple images can be found in the
 [systemd](https://github.com/systemd/systemd/tree/main/mkosi/mkosi.images)
 repository.
 
+When one or more images are built, the selected dependency graph is treated
+as a *build generation*: after the configure scripts ran, the graph, the
+resulting configuration of each image and the repository metadata and
+package inputs are frozen. Images are built in dependency order and each
+image only consumes the candidate outputs of this same generation, which
+are first published to an isolated directory below the output directory.
+The candidate outputs (images, manifests and associated files) as well as
+the build history only replace the outputs of the previous complete build
+once every image of the graph has been built successfully, at which point
+the whole generation is committed in a single journaled step and the
+auto-bump is performed. If any image fails to build, the build is
+cancelled or `mkosi clean` is run, the previous complete outputs remain in
+place and the partial candidate outputs never become default inputs. The
+state of an interrupted generation is persisted below
+`.mkosi-private/generations/` in the output directory: the next
+`mkosi build` resumes the images that were not finished (reusing candidate
+outputs of images that finished) or discards the candidates when the frozen
+configuration or inputs changed; candidate outputs are never mistaken for
+a successful build based on existing files in the output directory.
+Dependency graphs that do not share images can still be built
+independently. A later invocation (even with `--force`) resumes an
+interrupted generation of the same frozen graph; use `mkosi clean` to
+discard the candidate outputs and start over.
+
 # ENVIRONMENT VARIABLES
 
 * `$MKOSI_LESS` overrides options for **less** when it is invoked by

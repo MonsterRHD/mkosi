@@ -75,10 +75,12 @@ from mkosi.config import (
     expand_delayed_specifiers,
     finalize_configdir,
     finalize_historydir,
+    finalize_historydirs,
     format_bytes,
     in_box,
     parse_boolean,
     parse_config,
+    promote_pending_history,
     resolve_deps,
     summary,
     systemd_tool_version,
@@ -90,6 +92,14 @@ from mkosi.config import (
 from mkosi.context import Context
 from mkosi.distribution import Distribution, detect_distribution
 from mkosi.documentation import show_docs
+from mkosi.generation import (
+    Generation,
+    NodeSpec,
+    any_pending_generation,
+    discard_all_generations,
+    finalize_generations_dirs,
+    pending_generation_for_images,
+)
 from mkosi.installer import clean_package_manager_metadata
 from mkosi.kmod import (
     filter_devicetrees,
@@ -4762,7 +4772,13 @@ def needs_build(args: Args, config: Config, force: int = 1) -> bool:
     )
 
 
-def run_clean(args: Args, config: Config, repository_metadata_needs_sync: bool = False) -> None:
+def run_clean(
+    args: Args,
+    config: Config,
+    repository_metadata_needs_sync: bool = False,
+    *,
+    remove_outputs: Optional[bool] = None,
+) -> None:
     # We remove any cached images if either the user used --force twice, or he/she called "clean"
     # with it passed once. Let's also remove the downloaded package cache if the user specified one
     # additional "--force".
@@ -4774,12 +4790,14 @@ def run_clean(args: Args, config: Config, repository_metadata_needs_sync: bool =
 
     remove_image_cache_reason: Optional[str] = None
     if args.verb == Verb.clean:
-        remove_outputs = True
+        if remove_outputs is None:
+            remove_outputs = True
         remove_build_cache = args.force > 0 or args.wipe_build_dir
         remove_image_cache = args.force > 0
         remove_package_cache = args.force > 1
     else:
-        remove_outputs = args.force > 0 or (config.is_incremental() and not have_cache(config))
+        if remove_outputs is None:
+            remove_outputs = args.force > 0 or (config.is_incremental() and not have_cache(config))
         remove_build_cache = args.force > 1 or args.wipe_build_dir
         if args.force > 1:
             remove_image_cache_reason = "'--force' was passed at least twice"
@@ -5014,6 +5032,32 @@ def sync_repository_metadata(
     return keyring_dir, metadata_dir
 
 
+def generation_inputs(images: Sequence[Config], tools: Optional[Config]) -> dict[str, str]:
+    # Freeze the content-level inputs shared by the nodes of a build generation: the per-image cache
+    # manifests (distribution, repositories, package lists, package directories and scripts) and the
+    # default tools tree manifest. The synced repository metadata itself is not fingerprinted: all
+    # nodes of one run share a single metadata snapshot (it is synced once before the node loop),
+    # and across invocations its freshness is governed by the existing CacheOnly= heuristics; using
+    # metadata directory timestamps here would discard all candidates whenever the metadata is
+    # re-synced, even though the frozen package and repository set did not change.
+    manifests = json.dumps(
+        {config.image: config.cache_manifest() for config in images},
+        cls=JsonEncoder,
+        sort_keys=True,
+    )
+
+    tools_manifest = ""
+    if tools is not None:
+        p = cache_tree_paths(tools)[2]
+        if p.exists():
+            tools_manifest = hash_file(p)
+
+    return {
+        "cache-manifests": hashlib.sha256(manifests.encode()).hexdigest(),
+        "tools-manifest": tools_manifest,
+    }
+
+
 def ensure_tools_tree_has_etc_resolv_conf(config: Config) -> None:
     if not config.tools_tree:
         return
@@ -5154,6 +5198,7 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
             run_clean(args, config)
 
         rmtree(finalize_historydir(args))
+        discard_all_generations(args, last.output_dir)
 
         return
 
@@ -5222,6 +5267,18 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
 
     output = last.output_dir_or_cwd() / last.output_with_compression
 
+    # Build generations are used for every verb that may build images, except --rerun-build-scripts
+    # which keeps its traditional semantics of re-running build scripts against existing outputs.
+    use_generation = args.verb.needs_build() and not args.rerun_build_scripts
+    generation_dirs = finalize_generations_dirs(args, last.output_dir)
+    pending_generation = use_generation and any_pending_generation(generation_dirs)
+
+    if pending_generation and args.verb != Verb.build:
+        log_notice(
+            "Found an interrupted build generation, using the outputs of the last complete build. "
+            "Run 'mkosi build' to resume or 'mkosi clean' to discard the candidate outputs."
+        )
+
     if (
         args.verb == Verb.build
         and not args.force
@@ -5229,8 +5286,12 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
         and output.exists()
         and not output.is_symlink()
         and not args.rerun_build_scripts
+        and not pending_generation
     ):
         logging.info(f"Output path {output} exists already. (Use --force to rebuild.)")
+        # Preserve the historical behavior of publishing the just-parsed history even when the
+        # build itself is skipped.
+        promote_pending_history(finalize_historydirs(args, last.output_dir))
         return
 
     if args.rerun_build_scripts and last.output_format != OutputFormat.none and not output.exists():
@@ -5289,7 +5350,16 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
     # a later image build could end up deleting the output generated by an earlier image build.
     if needs_build(args, last) or args.wipe_build_dir:
         for config in images:
-            run_clean(args, config, repository_metadata_needs_sync(images))
+            # For build generations, the previous outputs must stay in the real output directory
+            # until the new generation is committed, so that they remain the rollback / default
+            # inputs if the build fails. Output removal and clean scripts are deferred to the
+            # generation commit. Caches and the build directory are still cleaned up here.
+            run_clean(
+                args,
+                config,
+                repository_metadata_needs_sync(images),
+                remove_outputs=False if use_generation else None,
+            )
 
     for i, config in enumerate(images):
         if args.verb != Verb.build:
@@ -5302,11 +5372,21 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
     last = images[-1]
     images = resolve_deps(images[:-1], last.dependencies) + [last]
 
-    if (
+    # The configure scripts now determined the final graph, so check whether any of the interrupted
+    # build generations actually shares a node with it. A pending generation of an unrelated graph
+    # must not cause this graph to be rebuilt.
+    pending_intersects = use_generation and pending_generation_for_images(
+        generation_dirs, {config.image for config in images}
+    )
+
+    build_block_needed = (
         args.rerun_build_scripts
         or last.output_format == OutputFormat.none
         or not (last.output_dir_or_cwd() / last.output).exists()
-    ):
+        or (use_generation and (args.force > 0 or (args.verb == Verb.build and pending_intersects)))
+    )
+
+    if build_block_needed:
         for config in images:
             if any(
                 source.type != KeySourceType.file
@@ -5319,80 +5399,210 @@ def run_verb(args: Args, tools: Optional[Config], images: Sequence[Config], *, r
                 join_new_session_keyring()
                 break
 
-        validate = [
-            c
-            for c in images
-            if c.output_format != OutputFormat.none and not (c.output_dir_or_cwd() / c.output).exists()
-        ]
-        if validate:
-            with complete_step("Validating certificates and keys"):
-                for config in validate:
-                    validate_certificates_and_keys(config)
-
         ensure_directories_exist(last)
 
         with contextlib.ExitStack() as stack:
-            package_dir = Path(
-                stack.enter_context(
-                    tempfile.TemporaryDirectory(
-                        dir=last.workspace_dir_or_default(),
-                        prefix="mkosi-packages-",
+            gen: Optional[Generation] = None
+
+            if use_generation:
+                # The dependency graph and each post-configure Config are now frozen as a build
+                # generation. Every node only consumes candidate outputs of this generation and the
+                # whole graph is committed atomically once all nodes succeeded; interrupted
+                # generations are resumed from their persisted state instead of trusting "output
+                # exists" checks.
+                specs = [
+                    NodeSpec(
+                        name=config.image,
+                        deps=tuple(config.dependencies),
+                        config=config,
+                        clean_scripts=args.force > 0 or (config.is_incremental() and not have_cache(config)),
                     )
+                    for config in images
+                ]
+                gen = Generation.begin(
+                    last.output_dir_or_cwd(),
+                    specs,
+                    sandbox=last.sandbox,
                 )
-            )
+                # Closing releases the build lock; it never discards the generation state so that
+                # failed or cancelled builds remain resumable.
+                stack.callback(gen.close)
+
+            def needs_validation(config: Config) -> bool:
+                if config.output_format == OutputFormat.none:
+                    return False
+                if gen is not None:
+                    return gen.needs_build(config.image)
+                return not (config.output_dir_or_cwd() / config.output).exists()
+
+            validate = [c for c in images if needs_validation(c)]
+            if validate:
+                with complete_step("Validating certificates and keys"):
+                    for config in validate:
+                        validate_certificates_and_keys(config)
 
             for config in images:
                 ensure_directories_exist(config)
                 run_sync_scripts(config)
 
-            ikd = imd = None
+            ikd: Optional[Path] = None
+            imd: Optional[Path] = None
+            built = False
 
-            for config in images:
-                # If the output format is "none" or we're rebuilding and there are no build scripts, there's
-                # nothing to do so exit early.
-                if (
-                    config.output_format == OutputFormat.none
-                    or (args.rerun_build_scripts and (config.output_dir_or_cwd() / config.output).exists())
-                ) and not config.build_scripts:
-                    continue
+            if gen is not None:
+                if not gen.committing:
+                    build_configs = [
+                        config
+                        for config in images
+                        if config.output_format != OutputFormat.none or config.build_scripts
+                    ]
+                    to_build = [config for config in build_configs if gen.needs_build(config.image)]
 
-                check_tools(config, Verb.build)
-                check_inputs(config)
+                    # Nodes without an output format and without build scripts have nothing to do
+                    # but are still part of the frozen graph, so record them as completed.
+                    build_names = {config.image for config in build_configs}
+                    for config in images:
+                        if config.image not in build_names and gen.needs_build(config.image):
+                            gen.mark_done(config.image, [])
 
-                if not ikd and not imd:
-                    ikd, imd = sync_repository_metadata(
-                        args,
-                        images,
-                        resources=resources,
-                        stack=stack,
-                    )
-
-                assert ikd
-                assert imd
-
-                with (
-                    complete_step(f"Building {config.image} image"),
-                    setup_workspace(args, config) as workspace,
-                ):
-                    build_image(
-                        Context(
+                    if to_build:
+                        ikd, imd = sync_repository_metadata(
                             args,
-                            config,
-                            workspace=workspace,
+                            images,
                             resources=resources,
-                            keyring_dir=ikd,
-                            metadata_dir=imd,
-                            package_dir=package_dir,
+                            stack=stack,
+                        )
+                        assert ikd
+                        assert imd
+                        # Freeze the package inputs before the first node builds. If they changed
+                        # since the interrupted attempt, candidates are discarded and the graph is
+                        # rebuilt.
+                        gen.freeze_inputs(generation_inputs(images, tools))
+
+                    for config in build_configs:
+                        if not gen.needs_build(config.image):
+                            logging.info(
+                                f"Reusing candidate outputs of {config.image} image from the "
+                                "interrupted build generation"
+                            )
+                            continue
+
+                        check_tools(config, Verb.build)
+                        # Read dependency inputs (BaseTrees=, ExtraTrees=, Initrds=) and publish the
+                        # staging outputs through the isolated generation view.
+                        view_config = gen.remap_config(config)
+                        check_inputs(view_config)
+
+                        gen.mark_building(config.image)
+                        before = {p.name for p in gen.view.iterdir()}
+
+                        assert ikd is not None
+                        assert imd is not None
+
+                        with (
+                            complete_step(f"Building {config.image} image"),
+                            setup_workspace(args, config) as workspace,
+                        ):
+                            build_image(
+                                Context(
+                                    args,
+                                    view_config,
+                                    workspace=workspace,
+                                    resources=resources,
+                                    keyring_dir=ikd,
+                                    metadata_dir=imd,
+                                    package_dir=gen.packages,
+                                )
+                            )
+
+                        published = sorted({p.name for p in gen.view.iterdir()} - before)
+                        gen.mark_done(config.image, published)
+                        built = True
+
+                # All nodes of the frozen graph have been built. Publish their candidate outputs, the
+                # build history and (afterwards) the auto-bump in one journaled commit. A crash during
+                # the commit is rolled forward to completion by the next invocation.
+                gen.commit(
+                    run_clean_scripts=run_clean_scripts,
+                    historydirs=finalize_historydirs(args, last.output_dir),
+                )
+
+                if built:
+                    ring_terminal_bell()
+                elif not gen.committing:
+                    logging.info("All images have already been built and do not have any build scripts")
+
+                if args.auto_bump:
+                    finalize_image_version(args, last)
+
+            else:
+                # Legacy build path (--rerun-build-scripts), which reuses the existing outputs and
+                # publishes directly into the output directory.
+                package_dir = Path(
+                    stack.enter_context(
+                        tempfile.TemporaryDirectory(
+                            dir=last.workspace_dir_or_default(),
+                            prefix="mkosi-packages-",
                         )
                     )
+                )
 
-            if not ikd and not imd:
-                logging.info("All images have already been built and do not have any build scripts")
-            else:
-                ring_terminal_bell()
+                for config in images:
+                    # If the output format is "none" or we're rebuilding and there are no build
+                    # scripts, there's nothing to do so exit early.
+                    if (
+                        config.output_format == OutputFormat.none
+                        or (
+                            args.rerun_build_scripts
+                            and (config.output_dir_or_cwd() / config.output).exists()
+                        )
+                    ) and not config.build_scripts:
+                        continue
 
-        if args.auto_bump:
-            finalize_image_version(args, last)
+                    check_tools(config, Verb.build)
+                    check_inputs(config)
+
+                    if not ikd and not imd:
+                        ikd, imd = sync_repository_metadata(
+                            args,
+                            images,
+                            resources=resources,
+                            stack=stack,
+                        )
+
+                    assert ikd
+                    assert imd
+
+                    with (
+                        complete_step(f"Building {config.image} image"),
+                        setup_workspace(args, config) as workspace,
+                    ):
+                        build_image(
+                            Context(
+                                args,
+                                config,
+                                workspace=workspace,
+                                resources=resources,
+                                keyring_dir=ikd,
+                                metadata_dir=imd,
+                                package_dir=package_dir,
+                            )
+                        )
+                    built = True
+
+                if not ikd and not imd:
+                    logging.info("All images have already been built and do not have any build scripts")
+                else:
+                    ring_terminal_bell()
+
+                if args.auto_bump:
+                    finalize_image_version(args, last)
+
+    elif args.verb == Verb.build:
+        # The build block did not run because all outputs are up to date and there is no
+        # interrupted generation to resume. Keep the historical behavior of publishing the
+        # just-parsed history in this case.
+        promote_pending_history(finalize_historydirs(args, last.output_dir))
 
     if args.verb == Verb.build:
         return

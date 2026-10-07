@@ -21,9 +21,11 @@ from mkosi.config import (
     OutputFormat,
     Verb,
     config_parse_bytes,
+    finalize_historydirs,
     in_box,
     parse_config,
     parse_ini,
+    promote_pending_history,
 )
 from mkosi.distribution import Distribution, detect_distribution
 from mkosi.util import chdir, resource_path
@@ -1983,7 +1985,10 @@ def test_history_empty_list(tmp_path: Path) -> None:
     )
 
     with chdir(d):
-        _, _, [main] = parse_config(["--package-directory=", "build"])
+        args, _, [main] = parse_config(["--package-directory=", "build"])
+        # The build history is staged as pending.json during parsing and only promoted by the build
+        # pipeline once the build generation commits successfully.
+        promote_pending_history(finalize_historydirs(args))
 
     assert (d / ".mkosi-private/history/latest.json").exists()
     assert main.package_directories == []
@@ -2017,7 +2022,9 @@ def test_history_found_via_configured_output_directory(tmp_path: Path) -> None:
 
     with chdir(d):
         # The build passes -O explicitly, pointing at the same directory the config already configures.
-        parse_config(["--output-directory", os.fspath(out), "--image-id", "img-x", "build"])
+        args, _, _ = parse_config(["--output-directory", os.fspath(out), "--image-id", "img-x", "build"])
+        # The build pipeline publishes the pending history when the build generation commits.
+        promote_pending_history(finalize_historydirs(args, out))
 
         # A consumer relies on the configured OutputDirectory and passes no -O. It must still read back
         # the build's history.
@@ -2045,8 +2052,10 @@ def test_history_isolated_per_output_directory(tmp_path: Path) -> None:
     # Two builds into different output directories, each recording its own build history, distinguished
     # by ImageId so we can tell which build a later consumer reads back.
     with chdir(d):
-        parse_config(["--output-directory", os.fspath(out_a), "--image-id", "img-a", "build"])
-        parse_config(["--output-directory", os.fspath(out_b), "--image-id", "img-b", "build"])
+        args, _, _ = parse_config(["--output-directory", os.fspath(out_a), "--image-id", "img-a", "build"])
+        promote_pending_history(finalize_historydirs(args, out_a))
+        args, _, _ = parse_config(["--output-directory", os.fspath(out_b), "--image-id", "img-b", "build"])
+        promote_pending_history(finalize_historydirs(args, out_b))
 
         # A verb that consumes a previous build, pointed at output directory A, must read back the
         # configuration of the build that wrote into A -- not whichever build happened to run last.

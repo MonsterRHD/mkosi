@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: configure scripts 完成后冻结选中 Config、依赖边和拓扑顺序，后续变更不混入本代。
+  - id: 2
+    type: f2p
+    text: repository metadata、package directory 与外部输入具有图代际身份，所有节点读取同一快照。
+  - id: 3
+    type: f2p
+    text: base、subimage、tools、initrd 和最终镜像只消费本代已验证候选上游，不读取部分新旧混合输出。
+  - id: 4
+    type: f2p
+    text: 每个节点的 image、manifest、history 和关联输出先进入隔离候选，单节点完成不等于当前成功。
+  - id: 5
+    type: f2p
+    text: 只有选中依赖图全部节点完成并验证后，所有输出才一次成为当前代际。
+  - id: 6
+    type: f2p
+    text: 后续节点失败、取消或 clean 介入会恢复上一完整图，并隔离本代已完成候选。
+  - id: 7
+    type: p2p
+    text: 进程重启能继续或清理持久候选图，output exists 与 needs_build 不会把部分图误判为独立成功。
+  - id: 8
+    type: p2p
+    text: auto-bump 仅在整图确认后运行；单镜像、force、strict incremental、依赖排序和互不共享的图保持通过。
