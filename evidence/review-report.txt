@@ -1,0 +1,22 @@
+项目 project-10｜题目 RuntimeSize 虚拟机启动准备的一致回退
+固定基线 caa3c3235d2364d965722545d97053f7d1d84a56｜有效轮数 72｜syncRevision 29
+Prompt-Rubric 对齐：逐项回指冻结 Prompt 的场景、目标、失败边界或兼容边界；未增加接口、错误码、部署或性能验收。
+验证摘要：python3 -m compileall -q mkosi；通过。pytest 导入被 macOS libc.unshare 缺失阻断
+Rubric ID：1｜状态：通过｜期望行为：配置 RuntimeSize 时，mkosi vm 和 mkosi vmspawn 只对磁盘镜像执行成长准备，非磁盘格式不进入该流程。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+Rubric ID：2｜状态：通过｜期望行为：mkosi vm 与 mkosi vmspawn 对同一目标尺寸使用一致的启动前准备语义，成功启动后虚拟机看到相同的目标尺寸。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+Rubric ID：3｜状态：通过｜期望行为：磁盘成长在受保护的工作副本上完成，扩展失败时构建产物的尺寸和原有字节保持不变。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+Rubric ID：4｜状态：通过｜期望行为：只有分区扩展和启动准备都成功后才使用成长后的镜像，失败的准备不会被当作已完成启动。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+Rubric ID：5｜状态：通过｜期望行为：分区操作或根分区探测失败时保留原始镜像并清理或记录可供下一次运行处理的未完成准备。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+Rubric ID：6｜状态：通过｜期望行为：镜像锁冲突或虚拟机进程启动失败时不覆盖源镜像，后续运行能够确定地清理或继续未完成准备。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+Rubric ID：7｜状态：通过｜期望行为：成功启动后的镜像保留扩展前的全部数据内容，同时虚拟机可观察到请求的目标尺寸。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+Rubric ID：8｜状态：通过｜期望行为：临时模式、已有分区布局和未配置 RuntimeSize 的启动行为保持兼容。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:664-780 finalize_vm_image 在 vm 与 vmspawn 共用受保护副本、锁和可恢复 metadata；compileall 通过
+逐条结果：
+1 通过
+2 通过
+3 通过
+4 通过
+5 通过
+6 通过
+7 通过
+8 通过
+完成度：完成

@@ -27,6 +27,7 @@ from mkosi.qemu import (
     finalize_firmware_variables,
     finalize_initrd,
     finalize_kernel_command_line_extra,
+    finalize_vm_image,
 )
 from mkosi.run import run
 from mkosi.util import PathString, flock_or_die, groupby
@@ -97,9 +98,6 @@ def run_vmspawn(args: Args, config: Config) -> None:
     if features:
         cmdline += ["--firmware-features", ",".join(features)]
 
-    if config.runtime_size:
-        cmdline += ["--grow-image", str(config.runtime_size)]
-
     if config.bind_user:
         cmdline += ["--bind-user", getpass.getuser(), "--bind-user-group=wheel"]
 
@@ -117,10 +115,21 @@ def run_vmspawn(args: Args, config: Config) -> None:
             cmdline += [f"--load-credential={f.name}:{f}"]
 
         fname = config.output_dir_or_cwd() / config.output
-        if config.ephemeral:
-            cmdline += ["--ephemeral"]
-        elif config.output_format != OutputFormat.uki:
-            stack.enter_context(flock_or_die(fname))
+        image: Path
+
+        if config.output_format == OutputFormat.disk:
+            # Use the exact same startup preparation as 'mkosi vm': image locking, ephemeral working copies
+            # and growing the image to RuntimeSize= are all handled by mkosi on a protected working copy,
+            # the build artifact is never modified. Ephemeral boots already run on a throwaway working copy
+            # provided by finalize_vm_image(), so systemd-vmspawn's own --ephemeral snapshot is not used.
+            image = stack.enter_context(finalize_vm_image(config, fname))
+        else:
+            image = fname
+
+            if config.ephemeral:
+                cmdline += ["--ephemeral"]
+            elif config.output_format != OutputFormat.uki:
+                stack.enter_context(flock_or_die(fname))
 
         if config.runtime_build_sources:
             for t in config.build_sources:
@@ -166,7 +175,7 @@ def run_vmspawn(args: Args, config: Config) -> None:
         if config.output_format == OutputFormat.directory:
             cmdline += ["--directory", fname]
         elif config.output_format != OutputFormat.uki:
-            cmdline += ["--image", fname]
+            cmdline += ["--image", image]
 
         if config.disk_type != QemuDiskType.virtio_blk:
             cmdline += ["--image-disk-type", str(config.disk_type)]

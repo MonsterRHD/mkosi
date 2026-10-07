@@ -680,6 +680,105 @@ def apply_runtime_size(config: Config, image: Path) -> None:
     )  # fmt: skip
 
 
+def runtime_image_paths(src: Path) -> tuple[Path, Path]:
+    return (
+        src.parent / f".{src.name}.runtime",
+        src.parent / f".{src.name}.runtime.json",
+    )
+
+
+def valid_runtime_image(src: Path, image: Path, metadata: Path, size: int) -> bool:
+    # Make sure the prepared working copy still matches the source image and the requested runtime size.
+    # If anything is off, the caller discards the working copy and prepares a new one.
+    try:
+        state = json.loads(metadata.read_text())
+        st = src.stat()
+        return (
+            state.get("runtime_size") == size
+            and state.get("source_dev") == st.st_dev
+            and state.get("source_ino") == st.st_ino
+            and state.get("source_size") == st.st_size
+            and state.get("source_mtime_ns") == st.st_mtime_ns
+            and image.is_file()
+            and image.stat().st_size == size
+        )
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+@contextlib.contextmanager
+def finalize_vm_image(config: Config, src: Path) -> Iterator[Path]:
+    """Prepare the image that a virtual machine is booted from.
+
+    This is shared by 'mkosi vm' and 'mkosi vmspawn' so that both entry points use the exact same startup
+    preparation sequence. The source image is never modified when RuntimeSize= is configured: disk images
+    are grown on a protected working copy next to the source image instead. A working copy left behind by a
+    previous run that was interrupted while preparing the image is either reused once it can be completed or
+    discarded if it is stale or incomplete.
+    """
+    if config.output_format != OutputFormat.disk or not config.runtime_size:
+        with copy_ephemeral(config, src) as image:
+            yield image
+        return
+
+    if config.ephemeral:
+        # Ephemeral boots always use a throwaway working copy, so grow that copy and leave the source image
+        # untouched.
+        with copy_ephemeral(config, src) as image:
+            apply_runtime_size(config, image)
+            yield image
+        return
+
+    # To use qemu's cache.direct option, the drive size has to be a multiple of the page size.
+    size = round_up(config.runtime_size, resource.getpagesize())
+    image, metadata = runtime_image_paths(src)
+
+    with flock_or_die(src):
+        if src.stat().st_size >= size:
+            # The partition layout of the source image already covers the requested size, so there is nothing
+            # to grow and the image is booted as-is. Remove any working copy left behind by an older
+            # RuntimeSize= setting.
+            rmtree(image, metadata, sandbox=config.sandbox)
+            yield src
+            return
+
+        if not valid_runtime_image(src, image, metadata, size):
+            # An unfinished, stale or otherwise invalid working copy from a previous (possibly interrupted)
+            # run cannot be continued, remove it and prepare a fresh one. All partition operations happen on
+            # the working copy, the source image remains untouched and is only read from.
+            rmtree(image, metadata, sandbox=config.sandbox)
+
+            tmp = image.parent / f".{src.name}.runtime.json.{uuid.uuid4().hex[:8]}"
+            try:
+                copy_tree(src, image, use_subvolumes=config.use_subvolumes, sandbox=config.sandbox)
+                apply_runtime_size(config, image)
+
+                st = src.stat()
+                tmp.write_text(
+                    json.dumps(
+                        {
+                            "runtime_size": size,
+                            "source_dev": st.st_dev,
+                            "source_ino": st.st_ino,
+                            "source_size": st.st_size,
+                            "source_mtime_ns": st.st_mtime_ns,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                tmp.replace(metadata)
+            except BaseException:
+                # If copying or growing the working copy fails, never fall back to modifying the source
+                # image: drop the unfinished preparation so that the next run starts over cleanly.
+                rmtree(image, metadata, tmp, sandbox=config.sandbox)
+                raise
+
+        # Boot the grown working copy. It is kept around after a successful run so that it can be reused
+        # directly by the next run (of either entry point). A failure while booting leaves it in place as
+        # well, the next run simply continues using it.
+        yield image
+
+
 @contextlib.contextmanager
 def finalize_drive(config: Config, drive: Drive) -> Iterator[Path]:
     dir = Path(drive.directory or "/var/tmp")
@@ -1134,10 +1233,8 @@ def run_qemu(args: Args, config: Config) -> None:
                 ]  # fmt: skip
 
         fname = stack.enter_context(
-            copy_ephemeral(config, config.output_dir_or_cwd() / config.output_with_compression)
+            finalize_vm_image(config, config.output_dir_or_cwd() / config.output_with_compression)
         )
-
-        apply_runtime_size(config, fname)
 
         kcl = []
         if kernel:

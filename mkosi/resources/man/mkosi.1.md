@@ -2099,9 +2099,16 @@ boolean argument: either `1`, `yes`, or `true` to enable, or `0`, `no`,
 
 `RuntimeSize=`, `--runtime-size=`
 :   If specified, disk images are grown to the specified size when
-    they're booted with `mkosi boot` or `mkosi vm`. Takes a size in
-    bytes. Additionally, the suffixes `K`, `M` and `G` can be used to
-    specify a size in kilobytes, megabytes and gigabytes respectively.
+    they're booted with `mkosi vm` or `mkosi vmspawn`. The disk image
+    itself is never modified: the image is copied to a protected
+    working copy next to the disk image which is grown instead and
+    which is reused for subsequent boots. If a previous run was
+    interrupted while preparing the working copy, the preparation is
+    continued or started over on the next run. Images that are already
+    as large as the specified size or larger and non-disk images are
+    booted as-is. Takes a size in bytes. Additionally, the suffixes
+    `K`, `M` and `G` can be used to specify a size in kilobytes,
+    megabytes and gigabytes respectively.
 
 `RuntimeNetwork=`, `--runtime-network=`
 :   Takes one of `user`, `interface` or `none`. Defaults to `user`.
