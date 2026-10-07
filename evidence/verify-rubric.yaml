@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: 文件目标存在活动转发会话时，新会话明确失败且不覆盖或截断已有日志。
+  - id: 2
+    type: f2p
+    text: 目录目标按目录语义追加和分片，已有日志在新会话启动、退出或重启后保持可读。
+  - id: 3
+    type: f2p
+    text: mkosi vm、mkosi vmspawn 和 mkosi boot 对 ForwardJournal 的文件目标与目录目标采用一致的可观察语义。
+  - id: 4
+    type: f2p
+    text: 转发子进程、Unix 或 vsock 监听、guest credential 与宿主输出在会话启动前后成对建立并关联同一目标。
+  - id: 5
+    type: f2p
+    text: 转发启动失败时保留原始错误，且不遗留仍运行的转发进程或临时 socket。
+  - id: 6
+    type: f2p
+    text: 虚拟机或容器正常退出时最终日志可读，转发子进程和监听资源被清理。
+  - id: 7
+    type: p2p
+    text: 会话被取消或异常退出后，下一次启动能够重新取得目标并继续写入，不受上次残留资源阻塞。
+  - id: 8
+    type: p2p
+    text: 未配置 ForwardJournal 时三种入口保持原有启动和日志行为。

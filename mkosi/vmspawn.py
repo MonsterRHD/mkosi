@@ -27,6 +27,7 @@ from mkosi.qemu import (
     finalize_firmware_variables,
     finalize_initrd,
     finalize_kernel_command_line_extra,
+    start_journal_forward_session,
 )
 from mkosi.run import run
 from mkosi.util import PathString, flock_or_die, groupby
@@ -172,6 +173,10 @@ def run_vmspawn(args: Args, config: Config) -> None:
             cmdline += ["--image-disk-type", str(config.disk_type)]
 
         if config.forward_journal:
+            # Acquire the journal target session before launching systemd-vmspawn to enforce the same file
+            # exclusivity and directory semantics as mkosi vm and mkosi boot.
+            stack.enter_context(start_journal_forward_session(config))
+
             cmdline += [
                 "--forward-journal", config.forward_journal,
                 "--forward-journal-max-use=1T",

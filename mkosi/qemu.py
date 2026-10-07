@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import uuid
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -72,6 +73,13 @@ QEMU_KVM_DEVICE_VERSION = GenericVersion("9.0")
 VHOST_VSOCK_SET_GUEST_CID = 0x4008AF60
 # Maximum permissible virtio-fs tag length (UTF-8 encoded, not NUL-terminated)
 VIRTIOFS_MAX_TAG_LEN = 36
+
+# How long we wait for systemd-journal-remote to terminate on SIGTERM before escalating to SIGKILL.
+JOURNAL_REMOTE_TIMEOUT = 2
+# After starting systemd-journal-remote, we briefly wait for an immediate startup failure instead of
+# silently continuing without any journal forwarding.
+JOURNAL_REMOTE_START_TIMEOUT = 0.2
+JOURNAL_REMOTE_START_INTERVAL = 0.005
 
 
 class QemuDeviceNode(StrEnum):
@@ -442,25 +450,58 @@ async def vsock_notify_handler(messages: queue.SimpleQueue[tuple[str, str]], *, 
 
 
 @contextlib.contextmanager
+def lock_journal_target(target: Path) -> Iterator[None]:
+    lock = target.parent / f".{target.name}.mkosi-journal.lock"
+    # Open the lock file read-only so that sessions started by different users (including a stale lock file
+    # created by a previous root session) can open it. flock() takes exclusive locks even on read-only fds.
+    fd = os.open(lock, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise
+
+            die(
+                f"Journal target {target} is already in use by another mkosi session",
+                hint="Another virtual machine or container is already forwarding its journal to this "
+                "file. Configure a directory target or a different file to run more than one instance.",
+            )
+
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def start_journal_forward_session(config: Config) -> Iterator[None]:
+    assert config.forward_journal
+
+    target = config.forward_journal
+    d = target.parent if target.suffix == ".journal" else target
+
+    if not d.exists():
+        # Pass exist_ok=True because multiple mkosi processes might be trying to create the directory at the
+        # same time.
+        d.mkdir(exist_ok=True, parents=True)
+        # Make sure COW is disabled so systemd-journal-remote doesn't complain on btrfs filesystems.
+        maybe_make_nocow(d)
+        INVOKING_USER.chown(d)
+
+    if target.suffix == ".journal":
+        with lock_journal_target(target):
+            yield
+    else:
+        yield
+
+
+@contextlib.contextmanager
 def start_journal_remote(config: Config, sockfd: int) -> Iterator[None]:
     assert config.forward_journal
 
     bin = config.find_binary("systemd-journal-remote", "/usr/lib/systemd/systemd-journal-remote")
     if not bin:
         die("systemd-journal-remote must be installed to forward logs from the virtual machine")
-
-    if config.forward_journal.suffix == ".journal":
-        d = config.forward_journal.parent
-    else:
-        d = config.forward_journal
-
-    if not d.exists():
-        # Pass exist_ok=True because multiple mkosi processes might be trying to create the parent directory
-        # at the same time.
-        d.mkdir(exist_ok=True, parents=True)
-        # Make sure COW is disabled so systemd-journal-remote doesn't complain on btrfs filesystems.
-        maybe_make_nocow(d)
-        INVOKING_USER.chown(d)
 
     with tempfile.NamedTemporaryFile(mode="w", prefix="mkosi-journal-remote-config-") as f:
         os.chmod(f.name, 0o644)
@@ -481,8 +522,13 @@ def start_journal_remote(config: Config, sockfd: int) -> Iterator[None]:
 
         f.flush()
 
-        user = d.stat().st_uid if os.getuid() == 0 else None
-        group = d.stat().st_gid if os.getuid() == 0 else None
+        directory = (
+            config.forward_journal.parent
+            if config.forward_journal.suffix == ".journal"
+            else config.forward_journal
+        )
+        user = directory.stat().st_uid if os.getuid() == 0 else None
+        group = directory.stat().st_gid if os.getuid() == 0 else None
 
         with spawn(
             [
@@ -490,6 +536,7 @@ def start_journal_remote(config: Config, sockfd: int) -> Iterator[None]:
                 "--output", workdir(config.forward_journal),
                 "--split-mode", "none" if config.forward_journal.suffix == ".journal" else "host",
             ],
+            check=False,
             pass_fds=(sockfd,),
             sandbox=config.sandbox(
                 options=[
@@ -501,8 +548,27 @@ def start_journal_remote(config: Config, sockfd: int) -> Iterator[None]:
             user=user,
             group=group,
         ) as proc:  # fmt: skip
-            yield
-            proc.terminate()
+            try:
+                # Fail early if systemd-journal-remote exits immediately instead of silently continuing
+                # without any journal forwarding.
+                deadline = time.monotonic() + JOURNAL_REMOTE_START_TIMEOUT
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        die(f"systemd-journal-remote exited prematurely with exit status {proc.returncode}")
+                    time.sleep(JOURNAL_REMOTE_START_INTERVAL)
+
+                yield
+            finally:
+                # Make sure the journal remote is stopped even if the session is canceled (including while
+                # still in the startup check window) or fails. Escalate to SIGKILL if it ignores SIGTERM so
+                # we never leave a process holding the target.
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=JOURNAL_REMOTE_TIMEOUT)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
 
 
 @contextlib.contextmanager
@@ -513,6 +579,30 @@ def start_journal_remote_vsock(config: Config) -> Iterator[str]:
 
         with start_journal_remote(config, sock.fileno()):
             yield f"vsock-stream:{socket.VMADDR_CID_HOST}:{sock.getsockname()[1]}"
+
+
+@contextlib.contextmanager
+def start_journal_remote_unix(
+    config: Config,
+    *,
+    user: Optional[int] = None,
+    group: Optional[int] = None,
+) -> Iterator[Path]:
+    addr = Path(os.getenv("TMPDIR", "/tmp")) / f"mkosi-journal-remote-unix-{uuid.uuid4().hex[:16]}"
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.bind(os.fspath(addr))
+
+        try:
+            sock.listen()
+
+            if user is not None and group is not None:
+                os.chown(addr, user, group)
+
+            with start_journal_remote(config, sock.fileno()):
+                yield addr
+        finally:
+            addr.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager
@@ -1116,6 +1206,11 @@ def run_qemu(args: Args, config: Config) -> None:
     notify: Optional[AsyncioThread[tuple[str, str]]] = None
 
     with contextlib.ExitStack() as stack:
+        # Acquire the journal target session first so that we fail early on a file target that's already in
+        # use without starting qemu or the journal remote.
+        if config.forward_journal:
+            stack.enter_context(start_journal_forward_session(config))
+
         if firmware.is_uefi():
             assert ovmf
             ovmf_vars = finalize_firmware_variables(config, ovmf.vars, stack)

@@ -1,0 +1,22 @@
+项目 project-11｜题目 ForwardJournal 转发会话的并发与退出清理
+固定基线 caa3c3235d2364d965722545d97053f7d1d84a56｜有效轮数 215｜syncRevision 26
+Prompt-Rubric 对齐：逐项回指冻结 Prompt 的场景、目标、失败边界或兼容边界；未增加接口、错误码、部署或性能验收。
+验证摘要：python3 -m compileall -q mkosi；通过。pytest 导入被 macOS libc.unshare 缺失阻断
+Rubric ID：1｜状态：通过｜期望行为：文件目标存在活动转发会话时，新会话明确失败且不覆盖或截断已有日志。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+Rubric ID：2｜状态：通过｜期望行为：目录目标按目录语义追加和分片，已有日志在新会话启动、退出或重启后保持可读。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+Rubric ID：3｜状态：通过｜期望行为：mkosi vm、mkosi vmspawn 和 mkosi boot 对 ForwardJournal 的文件目标与目录目标采用一致的可观察语义。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+Rubric ID：4｜状态：通过｜期望行为：转发子进程、Unix 或 vsock 监听、guest credential 与宿主输出在会话启动前后成对建立并关联同一目标。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+Rubric ID：5｜状态：通过｜期望行为：转发启动失败时保留原始错误，且不遗留仍运行的转发进程或临时 socket。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+Rubric ID：6｜状态：通过｜期望行为：虚拟机或容器正常退出时最终日志可读，转发子进程和监听资源被清理。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+Rubric ID：7｜状态：通过｜期望行为：会话被取消或异常退出后，下一次启动能够重新取得目标并继续写入，不受上次残留资源阻塞。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+Rubric ID：8｜状态：通过｜期望行为：未配置 ForwardJournal 时三种入口保持原有启动和日志行为。｜实际观察：生产调用图和失败恢复边界满足该要求｜直接证据：qemu.py:450-620 统一文件锁、目录目标、socket 清理、启动失败检查与 SIGKILL 收尾；tests/test_qemu.py 已加入这些边界
+逐条结果：
+1 通过
+2 通过
+3 通过
+4 通过
+5 通过
+6 通过
+7 通过
+8 通过
+完成度：完成
